@@ -1,0 +1,833 @@
+From: v0id <tyler@slaughter.pro>
+Subject: render: bump ShaderProgram path to GLSL ES 3.00 (#version 300 es)
+
+Niri hardcodes #version 100 for custom window shaders (open/close/resize),
+border, and shadow — linked with texture.vert. ES 1.00 limits array
+constructors and uses deprecated varying/gl_FragColor/texture2D.
+
+This patch moves the ShaderProgram compile path to GLSL ES 3.00:
+- shader_element.rs prepends #version 300 es
+- texture.vert: in/out instead of attribute/varying
+- Fragment preludes: in niri_v_coords, out niri_fragColor
+- Epilogues + border/shadow: niri_fragColor instead of gl_FragColor
+- Default resize.frag: texture() instead of texture2D()
+- Custom window shaders (open/close/resize): skip DEBUG_FLAGS variant compile
+  to halve driver peak memory during startup (embedded 512M MemoryMax)
+- Custom window shaders: stage sources at init, compile on first animation use
+- Log custom shader compile duration at info level
+
+Smithay compile_custom_texture_shader paths (clipped_surface, gradient_fade)
+and BlurProgram (blur.vert/down/up) remain ES 1.00 — separate link units.
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/backend/tty.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/backend/tty.rs
+--- a/src/backend/tty.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/backend/tty.rs	2026-06-24 00:10:17.213531921 -0600
+@@ -834,15 +834,20 @@
+             shaders::init(gles_renderer);
+ 
+             let config = self.config.borrow();
+-            if let Some(src) = config.animations.window_resize.custom_shader.as_deref() {
+-                shaders::set_custom_resize_program(gles_renderer, Some(src));
+-            }
+-            if let Some(src) = config.animations.window_close.custom_shader.as_deref() {
+-                shaders::set_custom_close_program(gles_renderer, Some(src));
+-            }
+-            if let Some(src) = config.animations.window_open.custom_shader.as_deref() {
+-                shaders::set_custom_open_program(gles_renderer, Some(src));
+-            }
++            shaders::stage_custom_shader_sources(
++                gles_renderer,
++                config
++                    .animations
++                    .window_resize
++                    .custom_shader
++                    .as_deref(),
++                config
++                    .animations
++                    .window_close
++                    .custom_shader
++                    .as_deref(),
++                config.animations.window_open.custom_shader.as_deref(),
++            );
+             drop(config);
+ 
+             niri.update_shaders();
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/backend/winit.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/backend/winit.rs
+--- a/src/backend/winit.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/backend/winit.rs	2026-06-24 00:10:17.213259270 -0600
+@@ -159,15 +159,20 @@
+         shaders::init(renderer);
+ 
+         let config = self.config.borrow();
+-        if let Some(src) = config.animations.window_resize.custom_shader.as_deref() {
+-            shaders::set_custom_resize_program(renderer, Some(src));
+-        }
+-        if let Some(src) = config.animations.window_close.custom_shader.as_deref() {
+-            shaders::set_custom_close_program(renderer, Some(src));
+-        }
+-        if let Some(src) = config.animations.window_open.custom_shader.as_deref() {
+-            shaders::set_custom_open_program(renderer, Some(src));
+-        }
++        shaders::stage_custom_shader_sources(
++            renderer,
++            config
++                .animations
++                .window_resize
++                .custom_shader
++                .as_deref(),
++            config
++                .animations
++                .window_close
++                .custom_shader
++                .as_deref(),
++            config.animations.window_open.custom_shader.as_deref(),
++        );
+         drop(config);
+ 
+         niri.update_shaders();
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/layout/closing_window.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/layout/closing_window.rs
+--- a/src/layout/closing_window.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/layout/closing_window.rs	2026-06-24 00:10:17.213817157 -0600
+@@ -18,7 +18,7 @@
+ use crate::niri_render_elements;
+ use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
+ use crate::render_helpers::shader_element::ShaderRenderElement;
+-use crate::render_helpers::shaders::{mat3_uniform, ProgramType, Shaders};
++use crate::render_helpers::shaders::{self, mat3_uniform, ProgramType, Shaders};
+ use crate::render_helpers::snapshot::RenderSnapshot;
+ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
+ use crate::render_helpers::{render_to_encompassing_texture, RenderCtx, RenderTarget};
+@@ -223,6 +223,7 @@
+         let progress = anim.value();
+         let clamped_progress = anim.clamped_value().clamp(0., 1.);
+ 
++        shaders::ensure_custom_close_program(ctx.renderer);
+         if Shaders::get(ctx.renderer)
+             .program(ProgramType::Close)
+             .is_some()
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/layout/opening_window.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/layout/opening_window.rs
+--- a/src/layout/opening_window.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/layout/opening_window.rs	2026-06-24 00:10:17.213701236 -0600
+@@ -15,7 +15,7 @@
+ use crate::niri_render_elements;
+ use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenData, OffscreenRenderElement};
+ use crate::render_helpers::shader_element::ShaderRenderElement;
+-use crate::render_helpers::shaders::{mat3_uniform, ProgramType, Shaders};
++use crate::render_helpers::shaders::{self, mat3_uniform, ProgramType, Shaders};
+ 
+ #[derive(Debug)]
+ pub struct OpenAnimation {
+@@ -63,6 +63,7 @@
+             .render(renderer, scale, elements)
+             .context("error rendering to offscreen buffer")?;
+ 
++        shaders::ensure_custom_open_program(renderer);
+         if Shaders::get(renderer).program(ProgramType::Open).is_some() {
+             // OffscreenBuffer renders with Transform::Normal and the scale that we passed, so we
+             // can assume that below.
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/resize.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/resize.rs
+--- a/src/render_helpers/resize.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/resize.rs	2026-06-24 00:10:17.213931245 -0600
+@@ -13,7 +13,7 @@
+ 
+ use super::renderer::{AsGlesFrame, NiriRenderer};
+ use super::shader_element::ShaderRenderElement;
+-use super::shaders::{mat3_uniform, ProgramType, Shaders};
++use super::shaders::{self, mat3_uniform, ProgramType, Shaders};
+ use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
+ 
+ #[derive(Debug)]
+@@ -116,6 +116,8 @@
+     }
+ 
+     pub fn has_shader(renderer: &mut impl NiriRenderer) -> bool {
++        let gles_renderer = renderer.as_gles_renderer();
++        shaders::ensure_custom_resize_program(gles_renderer);
+         Shaders::get(renderer)
+             .program(ProgramType::Resize)
+             .is_some()
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shader_element.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shader_element.rs
+--- a/src/render_helpers/shader_element.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shader_element.rs	2026-06-24 00:10:17.211715893 -0600
+@@ -41,6 +41,7 @@
+ struct ShaderProgramInner {
+     normal: ShaderProgramInternal,
+     debug: ShaderProgramInternal,
++    debug_compiled: bool,
+     uniform_tint: ffi::types::GLint,
+ }
+ 
+@@ -64,19 +65,12 @@
+     }
+ }
+ 
+-unsafe fn compile_program(
++unsafe fn program_internal(
+     gl: &ffi::Gles2,
+-    src: &str,
++    program: ffi::types::GLuint,
+     additional_uniforms: &[UniformName<'_>],
+     texture_uniforms: &[&str],
+-    // destruction_callback_sender: Sender<CleanupResource>,
+-) -> Result<ShaderProgram, GlesError> {
+-    let shader = format!("#version 100\n{src}");
+-    let program = unsafe { link_program(gl, include_str!("shaders/texture.vert"), &shader)? };
+-    let debug_shader = format!("#version 100\n#define DEBUG_FLAGS\n{src}");
+-    let debug_program =
+-        unsafe { link_program(gl, include_str!("shaders/texture.vert"), &debug_shader)? };
+-
++) -> ShaderProgramInternal {
+     let vert = c"vert";
+     let vert_position = c"vert_position";
+     let matrix = c"matrix";
+@@ -84,76 +78,90 @@
+     let size = c"niri_size";
+     let scale = c"niri_scale";
+     let alpha = c"niri_alpha";
++
++    ShaderProgramInternal {
++        program,
++        uniform_matrix: gl.GetUniformLocation(program, matrix.as_ptr()),
++        uniform_tex_matrix: gl.GetUniformLocation(program, tex_matrix.as_ptr()),
++        uniform_size: gl.GetUniformLocation(program, size.as_ptr()),
++        uniform_scale: gl.GetUniformLocation(program, scale.as_ptr()),
++        uniform_alpha: gl.GetUniformLocation(program, alpha.as_ptr()),
++        attrib_vert: gl.GetAttribLocation(program, vert.as_ptr()),
++        attrib_vert_position: gl.GetAttribLocation(program, vert_position.as_ptr()),
++        additional_uniforms: additional_uniforms
++            .iter()
++            .map(|uniform| {
++                let name = CString::new(uniform.name.as_bytes()).expect("Interior null in name");
++                let location = gl.GetUniformLocation(program, name.as_ptr());
++                (
++                    uniform.name.clone().into_owned(),
++                    UniformDesc {
++                        location,
++                        type_: uniform.type_,
++                    },
++                )
++            })
++            .collect(),
++        texture_uniforms: texture_uniforms
++            .iter()
++            .map(|name_| {
++                let name = CString::new(name_.as_bytes()).expect("Interior null in name");
++                let location = gl.GetUniformLocation(program, name.as_ptr());
++                (name_.to_string(), location)
++            })
++            .collect(),
++    }
++}
++
++fn empty_program_internal() -> ShaderProgramInternal {
++    ShaderProgramInternal {
++        program: 0,
++        uniform_tex_matrix: -1,
++        uniform_matrix: -1,
++        uniform_size: -1,
++        uniform_scale: -1,
++        uniform_alpha: -1,
++        attrib_vert: -1,
++        attrib_vert_position: -1,
++        additional_uniforms: HashMap::new(),
++        texture_uniforms: HashMap::new(),
++    }
++}
++
++unsafe fn compile_program(
++    gl: &ffi::Gles2,
++    src: &str,
++    additional_uniforms: &[UniformName<'_>],
++    texture_uniforms: &[&str],
++    compile_debug: bool,
++    // destruction_callback_sender: Sender<CleanupResource>,
++) -> Result<ShaderProgram, GlesError> {
++    let shader = format!("#version 300 es\n{src}");
++    let program = unsafe { link_program(gl, include_str!("shaders/texture.vert"), &shader)? };
++    let (debug_program, debug_compiled) = if compile_debug {
++        let debug_shader = format!("#version 300 es\n#define DEBUG_FLAGS\n{src}");
++        let debug_program =
++            unsafe { link_program(gl, include_str!("shaders/texture.vert"), &debug_shader)? };
++        (debug_program, true)
++    } else {
++        (0, false)
++    };
++
+     let tint = c"niri_tint";
+ 
+     Ok(ShaderProgram(Rc::new(ShaderProgramInner {
+-        normal: ShaderProgramInternal {
+-            program,
+-            uniform_matrix: gl.GetUniformLocation(program, matrix.as_ptr()),
+-            uniform_tex_matrix: gl.GetUniformLocation(program, tex_matrix.as_ptr()),
+-            uniform_size: gl.GetUniformLocation(program, size.as_ptr()),
+-            uniform_scale: gl.GetUniformLocation(program, scale.as_ptr()),
+-            uniform_alpha: gl.GetUniformLocation(program, alpha.as_ptr()),
+-            attrib_vert: gl.GetAttribLocation(program, vert.as_ptr()),
+-            attrib_vert_position: gl.GetAttribLocation(program, vert_position.as_ptr()),
+-            additional_uniforms: additional_uniforms
+-                .iter()
+-                .map(|uniform| {
+-                    let name =
+-                        CString::new(uniform.name.as_bytes()).expect("Interior null in name");
+-                    let location = gl.GetUniformLocation(program, name.as_ptr());
+-                    (
+-                        uniform.name.clone().into_owned(),
+-                        UniformDesc {
+-                            location,
+-                            type_: uniform.type_,
+-                        },
+-                    )
+-                })
+-                .collect(),
+-            texture_uniforms: texture_uniforms
+-                .iter()
+-                .map(|name_| {
+-                    let name = CString::new(name_.as_bytes()).expect("Interior null in name");
+-                    let location = gl.GetUniformLocation(program, name.as_ptr());
+-                    (name_.to_string(), location)
+-                })
+-                .collect(),
++        normal: program_internal(gl, program, additional_uniforms, texture_uniforms),
++        debug: if debug_compiled {
++            program_internal(gl, debug_program, additional_uniforms, texture_uniforms)
++        } else {
++            empty_program_internal()
+         },
+-        debug: ShaderProgramInternal {
+-            program: debug_program,
+-            uniform_matrix: gl.GetUniformLocation(debug_program, matrix.as_ptr()),
+-            uniform_tex_matrix: gl.GetUniformLocation(debug_program, tex_matrix.as_ptr()),
+-            uniform_size: gl.GetUniformLocation(debug_program, size.as_ptr()),
+-            uniform_scale: gl.GetUniformLocation(debug_program, scale.as_ptr()),
+-            uniform_alpha: gl.GetUniformLocation(debug_program, alpha.as_ptr()),
+-            attrib_vert: gl.GetAttribLocation(debug_program, vert.as_ptr()),
+-            attrib_vert_position: gl.GetAttribLocation(debug_program, vert_position.as_ptr()),
+-            additional_uniforms: additional_uniforms
+-                .iter()
+-                .map(|uniform| {
+-                    let name =
+-                        CString::new(uniform.name.as_bytes()).expect("Interior null in name");
+-                    let location = gl.GetUniformLocation(debug_program, name.as_ptr());
+-                    (
+-                        uniform.name.clone().into_owned(),
+-                        UniformDesc {
+-                            location,
+-                            type_: uniform.type_,
+-                        },
+-                    )
+-                })
+-                .collect(),
+-            texture_uniforms: texture_uniforms
+-                .iter()
+-                .map(|name_| {
+-                    let name = CString::new(name_.as_bytes()).expect("Interior null in name");
+-                    let location = gl.GetUniformLocation(debug_program, name.as_ptr());
+-                    (name_.to_string(), location)
+-                })
+-                .collect(),
++        debug_compiled,
++        uniform_tint: if debug_compiled {
++            gl.GetUniformLocation(debug_program, tint.as_ptr())
++        } else {
++            0
+         },
+-        uniform_tint: gl.GetUniformLocation(debug_program, tint.as_ptr()),
+     })))
+ }
+ 
+@@ -164,15 +172,42 @@
+         additional_uniforms: &[UniformName<'_>],
+         texture_uniforms: &[&str],
+     ) -> Result<Self, GlesError> {
++        Self::compile_with_debug(renderer, src, additional_uniforms, texture_uniforms, true)
++    }
++
++    pub fn compile_without_debug(
++        renderer: &mut GlesRenderer,
++        src: &str,
++        additional_uniforms: &[UniformName<'_>],
++        texture_uniforms: &[&str],
++    ) -> Result<Self, GlesError> {
++        Self::compile_with_debug(renderer, src, additional_uniforms, texture_uniforms, false)
++    }
++
++    fn compile_with_debug(
++        renderer: &mut GlesRenderer,
++        src: &str,
++        additional_uniforms: &[UniformName<'_>],
++        texture_uniforms: &[&str],
++        compile_debug: bool,
++    ) -> Result<Self, GlesError> {
+         renderer.with_context(move |gl| unsafe {
+-            compile_program(gl, src, additional_uniforms, texture_uniforms)
++            compile_program(
++                gl,
++                src,
++                additional_uniforms,
++                texture_uniforms,
++                compile_debug,
++            )
+         })?
+     }
+ 
+     pub fn destroy(self, renderer: &mut GlesRenderer) -> Result<(), GlesError> {
+         renderer.with_context(move |gl| unsafe {
+             gl.DeleteProgram(self.0.normal.program);
+-            gl.DeleteProgram(self.0.debug.program);
++            if self.0.debug_compiled {
++                gl.DeleteProgram(self.0.debug.program);
++            }
+         })
+     }
+ }
+@@ -379,7 +414,7 @@
+         // render
+         let span_loc = smithay::gpu_span_location!("draw shader");
+         frame.with_profiled_context(span_loc, move |gl| -> Result<(), GlesError> {
+-            let program = if has_debug {
++            let program = if has_debug && shader.0.debug_compiled {
+                 &shader.0.debug
+             } else {
+                 &shader.0.normal
+@@ -426,7 +461,7 @@
+                 gl.Uniform1f(program.uniform_alpha, self.alpha);
+ 
+                 let tint = if has_tint { 1.0f32 } else { 0.0f32 };
+-                if has_debug {
++                if has_debug && shader.0.debug_compiled {
+                     gl.Uniform1f(shader.0.uniform_tint, tint);
+                 }
+ 
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/border.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/border.frag
+--- a/src/render_helpers/shaders/border.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/border.frag	2026-06-24 00:10:17.212205434 -0600
+@@ -8,7 +8,8 @@
+ uniform float niri_scale;
+ 
+ uniform vec2 niri_size;
+-varying vec2 niri_v_coords;
++in vec2 niri_v_coords;
++out vec4 niri_fragColor;
+ 
+ uniform float colorspace;
+ uniform float hue_interpolation;
+@@ -233,5 +234,5 @@
+         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+ #endif
+ 
+-    gl_FragColor = color;
++    niri_fragColor = color;
+ }
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/close_epilogue.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/close_epilogue.frag
+--- a/src/render_helpers/shaders/close_epilogue.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/close_epilogue.frag	2026-06-24 00:10:17.212713966 -0600
+@@ -12,5 +12,5 @@
+         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+ #endif
+ 
+-    gl_FragColor = color;
++    niri_fragColor = color;
+ }
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/close_prelude.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/close_prelude.frag
+--- a/src/render_helpers/shaders/close_prelude.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/close_prelude.frag	2026-06-24 00:10:17.212617296 -0600
+@@ -4,7 +4,8 @@
+ uniform float niri_tint;
+ #endif
+ 
+-varying vec2 niri_v_coords;
++in vec2 niri_v_coords;
++out vec4 niri_fragColor;
+ uniform vec2 niri_size;
+ 
+ uniform mat3 niri_input_to_geo;
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/mod.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/mod.rs
+--- a/src/render_helpers/shaders/mod.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/mod.rs	2026-06-24 00:10:17.211953907 -0600
+@@ -1,4 +1,5 @@
+ use std::cell::RefCell;
++use std::time::Instant;
+ 
+ use glam::Mat3;
+ use smithay::backend::renderer::gles::{
+@@ -21,6 +22,9 @@
+     pub custom_resize: RefCell<Option<ShaderProgram>>,
+     pub custom_close: RefCell<Option<ShaderProgram>>,
+     pub custom_open: RefCell<Option<ShaderProgram>>,
++    custom_resize_src: RefCell<Option<String>>,
++    custom_close_src: RefCell<Option<String>>,
++    custom_open_src: RefCell<Option<String>>,
+ }
+ 
+ #[derive(Debug, Clone, Copy)]
+@@ -126,7 +130,7 @@
+             })
+             .ok();
+ 
+-        let resize = compile_resize_program(renderer, include_str!("resize.frag"))
++        let resize = compile_resize_program(renderer, include_str!("resize.frag"), true)
+             .map_err(|err| {
+                 warn!("error compiling resize shader: {err:?}");
+             })
+@@ -159,6 +163,9 @@
+             custom_resize: RefCell::new(None),
+             custom_close: RefCell::new(None),
+             custom_open: RefCell::new(None),
++            custom_resize_src: RefCell::new(None),
++            custom_close_src: RefCell::new(None),
++            custom_open_src: RefCell::new(None),
+         }
+     }
+ 
+@@ -219,37 +226,148 @@
+     }
+ }
+ 
++
++pub fn stage_custom_shader_sources(
++    renderer: &mut GlesRenderer,
++    resize: Option<&str>,
++    close: Option<&str>,
++    open: Option<&str>,
++) {
++    let shaders = Shaders::get(renderer);
++    *shaders.custom_resize_src.borrow_mut() = resize.map(str::to_owned);
++    *shaders.custom_close_src.borrow_mut() = close.map(str::to_owned);
++    *shaders.custom_open_src.borrow_mut() = open.map(str::to_owned);
++}
++
++pub fn ensure_custom_resize_program(renderer: &mut GlesRenderer) {
++    let src = {
++        let shaders = Shaders::get(renderer);
++        if shaders.custom_resize.borrow().is_some() {
++            return;
++        }
++        shaders.custom_resize_src.borrow().clone()
++    };
++    let Some(src) = src else {
++        return;
++    };
++    let bytes = src.len();
++    let started = Instant::now();
++    info!("compiling custom resize shader ({bytes} bytes)...");
++    match compile_resize_program(renderer, &src, false) {
++        Ok(program) => {
++            info!(
++                "compiled custom resize shader in {:.2?} ({bytes} bytes)",
++                started.elapsed()
++            );
++            *Shaders::get(renderer).custom_resize.borrow_mut() = Some(program);
++        }
++        Err(err) => {
++            warn!(
++                "error compiling custom resize shader after {:.2?} ({bytes} bytes): {err:?}",
++                started.elapsed()
++            );
++        }
++    }
++}
++
++pub fn ensure_custom_close_program(renderer: &mut GlesRenderer) {
++    let src = {
++        let shaders = Shaders::get(renderer);
++        if shaders.custom_close.borrow().is_some() {
++            return;
++        }
++        shaders.custom_close_src.borrow().clone()
++    };
++    let Some(src) = src else {
++        return;
++    };
++    let bytes = src.len();
++    let started = Instant::now();
++    info!("compiling custom close shader ({bytes} bytes)...");
++    match compile_close_program(renderer, &src) {
++        Ok(program) => {
++            info!(
++                "compiled custom close shader in {:.2?} ({bytes} bytes)",
++                started.elapsed()
++            );
++            *Shaders::get(renderer).custom_close.borrow_mut() = Some(program);
++        }
++        Err(err) => {
++            warn!(
++                "error compiling custom close shader after {:.2?} ({bytes} bytes): {err:?}",
++                started.elapsed()
++            );
++        }
++    }
++}
++
++pub fn ensure_custom_open_program(renderer: &mut GlesRenderer) {
++    let src = {
++        let shaders = Shaders::get(renderer);
++        if shaders.custom_open.borrow().is_some() {
++            return;
++        }
++        shaders.custom_open_src.borrow().clone()
++    };
++    let Some(src) = src else {
++        return;
++    };
++    let bytes = src.len();
++    let started = Instant::now();
++    info!("compiling custom open shader ({bytes} bytes)...");
++    match compile_open_program(renderer, &src) {
++        Ok(program) => {
++            info!(
++                "compiled custom open shader in {:.2?} ({bytes} bytes)",
++                started.elapsed()
++            );
++            *Shaders::get(renderer).custom_open.borrow_mut() = Some(program);
++        }
++        Err(err) => {
++            warn!(
++                "error compiling custom open shader after {:.2?} ({bytes} bytes): {err:?}",
++                started.elapsed()
++            );
++        }
++    }
++}
++
+ fn compile_resize_program(
+     renderer: &mut GlesRenderer,
+     src: &str,
++    compile_debug: bool,
+ ) -> Result<ShaderProgram, GlesError> {
+     let mut program = include_str!("resize_prelude.frag").to_string();
+     program.push_str(src);
+     program.push_str(include_str!("resize_epilogue.frag"));
+     program.push_str(include_str!("rounding_alpha.frag"));
+ 
+-    ShaderProgram::compile(
+-        renderer,
+-        &program,
+-        &[
+-            UniformName::new("niri_input_to_curr_geo", UniformType::Matrix3x3),
+-            UniformName::new("niri_curr_geo_to_prev_geo", UniformType::Matrix3x3),
+-            UniformName::new("niri_curr_geo_to_next_geo", UniformType::Matrix3x3),
+-            UniformName::new("niri_curr_geo_size", UniformType::_2f),
+-            UniformName::new("niri_geo_to_tex_prev", UniformType::Matrix3x3),
+-            UniformName::new("niri_geo_to_tex_next", UniformType::Matrix3x3),
+-            UniformName::new("niri_progress", UniformType::_1f),
+-            UniformName::new("niri_clamped_progress", UniformType::_1f),
+-            UniformName::new("niri_corner_radius", UniformType::_4f),
+-            UniformName::new("niri_clip_to_geometry", UniformType::_1f),
+-        ],
+-        &["niri_tex_prev", "niri_tex_next"],
+-    )
++    let uniforms = &[
++        UniformName::new("niri_input_to_curr_geo", UniformType::Matrix3x3),
++        UniformName::new("niri_curr_geo_to_prev_geo", UniformType::Matrix3x3),
++        UniformName::new("niri_curr_geo_to_next_geo", UniformType::Matrix3x3),
++        UniformName::new("niri_curr_geo_size", UniformType::_2f),
++        UniformName::new("niri_geo_to_tex_prev", UniformType::Matrix3x3),
++        UniformName::new("niri_geo_to_tex_next", UniformType::Matrix3x3),
++        UniformName::new("niri_progress", UniformType::_1f),
++        UniformName::new("niri_clamped_progress", UniformType::_1f),
++        UniformName::new("niri_corner_radius", UniformType::_4f),
++        UniformName::new("niri_clip_to_geometry", UniformType::_1f),
++    ];
++    let textures = &["niri_tex_prev", "niri_tex_next"];
++
++    if compile_debug {
++        ShaderProgram::compile(renderer, &program, uniforms, textures)
++    } else {
++        ShaderProgram::compile_without_debug(renderer, &program, uniforms, textures)
++    }
+ }
+ 
+ pub fn set_custom_resize_program(renderer: &mut GlesRenderer, src: Option<&str>) {
++    Shaders::get(renderer).custom_resize_src.replace(src.map(str::to_owned));
++
+     let program = if let Some(src) = src {
+-        match compile_resize_program(renderer, src) {
++        match compile_resize_program(renderer, src, false) {
+             Ok(program) => Some(program),
+             Err(err) => {
+                 warn!("error compiling custom resize shader: {err:?}");
+@@ -275,7 +393,7 @@
+     program.push_str(src);
+     program.push_str(include_str!("close_epilogue.frag"));
+ 
+-    ShaderProgram::compile(
++    ShaderProgram::compile_without_debug(
+         renderer,
+         &program,
+         &[
+@@ -291,6 +409,8 @@
+ }
+ 
+ pub fn set_custom_close_program(renderer: &mut GlesRenderer, src: Option<&str>) {
++    Shaders::get(renderer).custom_close_src.replace(src.map(str::to_owned));
++
+     let program = if let Some(src) = src {
+         match compile_close_program(renderer, src) {
+             Ok(program) => Some(program),
+@@ -318,7 +438,7 @@
+     program.push_str(src);
+     program.push_str(include_str!("open_epilogue.frag"));
+ 
+-    ShaderProgram::compile(
++    ShaderProgram::compile_without_debug(
+         renderer,
+         &program,
+         &[
+@@ -334,6 +454,8 @@
+ }
+ 
+ pub fn set_custom_open_program(renderer: &mut GlesRenderer, src: Option<&str>) {
++    Shaders::get(renderer).custom_open_src.replace(src.map(str::to_owned));
++
+     let program = if let Some(src) = src {
+         match compile_open_program(renderer, src) {
+             Ok(program) => Some(program),
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/open_epilogue.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/open_epilogue.frag
+--- a/src/render_helpers/shaders/open_epilogue.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/open_epilogue.frag	2026-06-24 00:10:17.212520239 -0600
+@@ -12,5 +12,5 @@
+         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+ #endif
+ 
+-    gl_FragColor = color;
++    niri_fragColor = color;
+ }
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/open_prelude.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/open_prelude.frag
+--- a/src/render_helpers/shaders/open_prelude.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/open_prelude.frag	2026-06-24 00:10:17.212420996 -0600
+@@ -4,7 +4,8 @@
+ uniform float niri_tint;
+ #endif
+ 
+-varying vec2 niri_v_coords;
++in vec2 niri_v_coords;
++out vec4 niri_fragColor;
+ uniform vec2 niri_size;
+ 
+ uniform mat3 niri_input_to_geo;
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/resize_epilogue.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/resize_epilogue.frag
+--- a/src/render_helpers/shaders/resize_epilogue.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/resize_epilogue.frag	2026-06-24 00:10:17.212911703 -0600
+@@ -23,5 +23,5 @@
+         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+ #endif
+ 
+-    gl_FragColor = color;
++    niri_fragColor = color;
+ }
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/resize.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/resize.frag
+--- a/src/render_helpers/shaders/resize.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/resize.frag	2026-06-24 00:10:17.213014293 -0600
+@@ -1,9 +1,9 @@
+ vec4 resize_color(vec3 coords_curr_geo, vec3 size_curr_geo) {
+     vec3 coords_tex_prev = niri_geo_to_tex_prev * coords_curr_geo;
+-    vec4 color_prev = texture2D(niri_tex_prev, coords_tex_prev.st);
++    vec4 color_prev = texture(niri_tex_prev, coords_tex_prev.st);
+ 
+     vec3 coords_tex_next = niri_geo_to_tex_next * coords_curr_geo;
+-    vec4 color_next = texture2D(niri_tex_next, coords_tex_next.st);
++    vec4 color_next = texture(niri_tex_next, coords_tex_next.st);
+ 
+     vec4 color = mix(color_prev, color_next, niri_clamped_progress);
+     return color;
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/resize_prelude.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/resize_prelude.frag
+--- a/src/render_helpers/shaders/resize_prelude.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/resize_prelude.frag	2026-06-24 00:10:17.212813258 -0600
+@@ -4,7 +4,8 @@
+ uniform float niri_tint;
+ #endif
+ 
+-varying vec2 niri_v_coords;
++in vec2 niri_v_coords;
++out vec4 niri_fragColor;
+ uniform vec2 niri_size;
+ 
+ uniform mat3 niri_input_to_curr_geo;
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/shadow.frag /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/shadow.frag
+--- a/src/render_helpers/shaders/shadow.frag	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/shadow.frag	2026-06-24 00:10:17.212319571 -0600
+@@ -8,7 +8,8 @@
+ uniform float niri_scale;
+ 
+ uniform vec2 niri_size;
+-varying vec2 niri_v_coords;
++in vec2 niri_v_coords;
++out vec4 niri_fragColor;
+ 
+ uniform vec4 shadow_color;
+ uniform float sigma;
+@@ -115,5 +116,5 @@
+         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+ #endif
+ 
+-    gl_FragColor = color;
++    niri_fragColor = color;
+ }
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/render_helpers/shaders/texture.vert /tmp/niri-glsl-regen-7x5zpljf/new/src/render_helpers/shaders/texture.vert
+--- a/src/render_helpers/shaders/texture.vert	1969-12-31 17:00:01.000000000 -0700
++++ b/src/render_helpers/shaders/texture.vert	2026-06-24 00:10:17.212076245 -0600
+@@ -1,12 +1,12 @@
+-#version 100
++#version 300 es
+ 
+ uniform mat3 matrix;
+ uniform mat3 tex_matrix;
+ 
+-attribute vec2 vert;
+-attribute vec4 vert_position;
++in vec2 vert;
++in vec4 vert_position;
+ 
+-varying vec2 niri_v_coords;
++out vec2 niri_v_coords;
+ 
+ mat2 scale(vec2 scale_vec){
+     return mat2(
+@@ -22,4 +22,3 @@
+     niri_v_coords = (tex_matrix * position).xy;
+     gl_Position = vec4(matrix * position, 1.0);
+ }
+-
+diff -ruN /tmp/niri-glsl-regen-7x5zpljf/orig/src/utils/mod.rs /tmp/niri-glsl-regen-7x5zpljf/new/src/utils/mod.rs
+--- a/src/utils/mod.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/utils/mod.rs	2026-06-24 00:10:17.213129396 -0600
+@@ -141,22 +141,25 @@
+ }
+ 
+ pub fn version() -> String {
+-    if let Some(v) = option_env!("NIRI_BUILD_VERSION_STRING") {
+-        return String::from(v);
+-    }
+-
+-    const MAJOR: &str = env!("CARGO_PKG_VERSION_MAJOR");
+-    const MINOR: &str = env!("CARGO_PKG_VERSION_MINOR");
+-    const PATCH: &str = env!("CARGO_PKG_VERSION_PATCH");
++    let base = if let Some(v) = option_env!("NIRI_BUILD_VERSION_STRING") {
++        String::from(v)
++    } else {
+ 
+-    let commit =
+-        option_env!("NIRI_BUILD_COMMIT").unwrap_or(git_version!(fallback = "unknown commit"));
++        const MAJOR: &str = env!("CARGO_PKG_VERSION_MAJOR");
++        const MINOR: &str = env!("CARGO_PKG_VERSION_MINOR");
++        const PATCH: &str = env!("CARGO_PKG_VERSION_PATCH");
+ 
+-    if PATCH == "0" {
+-        format!("{MAJOR}.{MINOR:0>2} ({commit})")
+-    } else {
+-        format!("{MAJOR}.{MINOR:0>2}.{PATCH} ({commit})")
+-    }
++        let commit =
++            option_env!("NIRI_BUILD_COMMIT").unwrap_or(git_version!(fallback = "unknown commit"));
++
++        if PATCH == "0" {
++            format!("{MAJOR}.{MINOR:0>2} ({commit})")
++        } else {
++            format!("{MAJOR}.{MINOR:0>2}.{PATCH} ({commit})")
++        }
++    };
++
++    format!("{base}-glsl3-beta")
+ }
+ 
+ pub fn get_monotonic_time() -> Duration {

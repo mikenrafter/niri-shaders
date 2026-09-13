@@ -1,0 +1,461 @@
+From: v0id <tyler@slaughter.pro>
+Subject: render: add window layout uniforms to custom shaders
+
+Exposes additional layout context to custom window shaders:
+- niri_window_size (vec2) — logical size of window (alias of niri_geo_size for close/open)
+- niri_window_pos (vec2) — view-relative window top-left in output logical coords
+- niri_output_size (vec2) — logical dimensions of the output/view
+- niri_is_tabbed (float) — 1.0 if column is in tabbed mode, 0.0 otherwise
+- niri_total_columns (float) — total columns in the workspace
+- niri_windows_in_column (float) — windows in this window's column
+- niri_window_index_in_column (float) — 0-based index of this window in its column
+- niri_columns_in_workspace (float) — same as niri_total_columns (ergonomic alias)
+- niri_column_index_in_workspace (float) — 0-based index of this column in workspace
+
+Column context uniforms apply to close/open shaders. niri_window_pos and
+niri_output_size apply to close/open/resize. niri_window_size applies to close/open.
+niri_window_pos is view-relative (geo_loc minus frozen view origin at animation start).
+Close animations freeze view_origin/output_size so last-window close stays stable.
+Floating windows receive ColumnCtx::default() (all zeros, is_tabbed=false).
+
+--- a/src/layout/closing_window.rs	2026-06-25 20:16:25.805665225 -0600
++++ b/src/layout/closing_window.rs	2026-06-25 20:55:49.575008932 -0600
+@@ -24,6 +24,16 @@
+ use crate::render_helpers::{render_to_encompassing_texture, RenderCtx, RenderTarget};
+ use crate::utils::transaction::TransactionBlocker;
+ 
++#[derive(Debug, Clone, Copy, Default)]
++pub struct ColumnCtx {
++    pub is_tabbed: bool,
++    pub total_columns: usize,
++    pub windows_in_column: usize,
++    pub window_index_in_column: usize,
++    pub columns_in_workspace: usize,
++    pub column_index_in_workspace: usize,
++}
++
+ #[derive(Debug)]
+ pub struct ClosingWindow {
+     /// Contents of the window.
+@@ -61,6 +71,15 @@
+ 
+     /// Random seed for the shader.
+     random_seed: f32,
++
++    /// Column context for uniforms.
++    column_ctx: ColumnCtx,
++
++    /// View origin frozen at close start (output-relative workspace scroll).
++    view_origin: Point<f64, Logical>,
++
++    /// Output/view size frozen at close start.
++    output_size: Size<f64, Logical>,
+ }
+ 
+ niri_render_elements! {
+@@ -102,6 +121,9 @@
+         pos: Point<f64, Logical>,
+         blocker: TransactionBlocker,
+         anim: Animation,
++        column_ctx: ColumnCtx,
++        view_origin: Point<f64, Logical>,
++        output_size: Size<f64, Logical>,
+     ) -> anyhow::Result<Self> {
+         let _span = tracy_client::span!("ClosingWindow::new");
+ 
+@@ -154,6 +176,9 @@
+             blocked_out_buffer_offset,
+             anim_state: AnimationState::new(blocker, anim),
+             random_seed: fastrand::f32(),
++            column_ctx,
++            view_origin,
++            output_size,
+         })
+     }
+ 
+@@ -228,16 +253,20 @@
+             .program(ProgramType::Close)
+             .is_some()
+         {
+-            let area_loc = Vec2::new(view_rect.loc.x as f32, view_rect.loc.y as f32);
+-            let area_size = Vec2::new(view_rect.size.w as f32, view_rect.size.h as f32);
++            let area_loc = Vec2::new(self.view_origin.x as f32, self.view_origin.y as f32);
++            let area_size = Vec2::new(self.output_size.w as f32, self.output_size.h as f32);
+ 
+-            // Round to physical pixels relative to the view position. This is similar to what
+-            // happens when rendering normal windows.
+-            let relative = self.pos - view_rect.loc;
+-            let pos = view_rect.loc + relative.to_physical_precise_round(scale).to_logical(scale);
++            // Round to physical pixels relative to the frozen view origin.
++            let relative = self.pos - self.view_origin;
++            let pos = self.view_origin
++                + relative.to_physical_precise_round(scale).to_logical(scale);
+ 
+             let geo_loc = Vec2::new(pos.x as f32, pos.y as f32);
+             let geo_size = Vec2::new(self.geo_size.w as f32, self.geo_size.h as f32);
++            let window_pos = Vec2::new(
++                (pos.x - self.view_origin.x) as f32,
++                (pos.y - self.view_origin.y) as f32,
++            );
+ 
+             let input_to_geo = Mat3::from_scale(area_size / geo_size)
+                 * Mat3::from_translation((area_loc - geo_loc) / area_size);
+@@ -253,7 +282,7 @@
+ 
+             return ShaderRenderElement::new(
+                 ProgramType::Close,
+-                view_rect.size,
++                self.output_size,
+                 None,
+                 scale.x as f32,
+                 1.,
+@@ -264,6 +293,15 @@
+                     Uniform::new("niri_progress", progress as f32),
+                     Uniform::new("niri_clamped_progress", clamped_progress as f32),
+                     Uniform::new("niri_random_seed", self.random_seed),
++                    Uniform::new("niri_window_size", geo_size.to_array()),
++                    Uniform::new("niri_window_pos", window_pos.to_array()),
++                    Uniform::new("niri_is_tabbed", if self.column_ctx.is_tabbed { 1.0_f32 } else { 0.0 }),
++                    Uniform::new("niri_total_columns", self.column_ctx.total_columns as f32),
++                    Uniform::new("niri_windows_in_column", self.column_ctx.windows_in_column as f32),
++                    Uniform::new("niri_window_index_in_column", self.column_ctx.window_index_in_column as f32),
++                    Uniform::new("niri_columns_in_workspace", self.column_ctx.columns_in_workspace as f32),
++                    Uniform::new("niri_column_index_in_workspace", self.column_ctx.column_index_in_workspace as f32),
++                    Uniform::new("niri_output_size", area_size.to_array()),
+                 ]),
+                 HashMap::from([(String::from("niri_tex"), buffer.texture().clone())]),
+                 Kind::Unspecified,
+@@ -291,7 +329,7 @@
+         );
+ 
+         let mut location = self.pos + offset;
+-        location.x -= view_rect.loc.x;
++        location.x -= self.view_origin.x;
+         let elem = RelocateRenderElement::from_element(
+             elem,
+             location.to_physical_precise_round(scale),
+--- a/src/layout/floating.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/layout/floating.rs	2026-06-25 20:55:41.127099885 -0600
+@@ -8,7 +8,7 @@
+ use smithay::backend::renderer::gles::GlesRenderer;
+ use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
+ 
+-use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
++use super::closing_window::{ClosingWindow, ClosingWindowRenderElement, ColumnCtx};
+ use super::scrolling::ColumnWidth;
+ use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
+ use super::workspace::{InteractiveResize, ResolvedSize};
+@@ -614,8 +614,11 @@
+         };
+ 
+         let scale = Scale::from(self.scale);
++        let view_origin = Point::from((0., 0.));
++        let output_size = self.view_size;
+         let res = ClosingWindow::new(
+             renderer, snapshot, scale, tile_size, tile_pos, blocker, anim,
++            ColumnCtx::default(), view_origin, output_size,
+         );
+         match res {
+             Ok(closing) => {
+@@ -684,7 +687,7 @@
+             return false;
+         };
+ 
+-        self.tiles[idx].start_open_animation();
++        self.tiles[idx].start_open_animation(ColumnCtx::default());
+         true
+     }
+ 
+--- a/src/layout/opening_window.rs	2026-06-25 20:16:25.805821817 -0600
++++ b/src/layout/opening_window.rs	2026-06-25 20:16:06.562325420 -0600
+@@ -12,6 +12,7 @@
+ use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
+ 
+ use crate::animation::Animation;
++use crate::layout::closing_window::ColumnCtx;
+ use crate::niri_render_elements;
+ use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenData, OffscreenRenderElement};
+ use crate::render_helpers::shader_element::ShaderRenderElement;
+@@ -22,6 +23,7 @@
+     anim: Animation,
+     random_seed: f32,
+     buffer: OffscreenBuffer,
++    column_ctx: ColumnCtx,
+ }
+ 
+ niri_render_elements! {
+@@ -32,11 +34,12 @@
+ }
+ 
+ impl OpenAnimation {
+-    pub fn new(anim: Animation) -> Self {
++    pub fn new(anim: Animation, column_ctx: ColumnCtx) -> Self {
+         Self {
+             anim,
+             random_seed: fastrand::f32(),
+             buffer: OffscreenBuffer::default(),
++            column_ctx,
+         }
+     }
+ 
+@@ -54,6 +57,7 @@
+         location: Point<f64, Logical>,
+         scale: Scale<f64>,
+         alpha: f32,
++        output_size: Size<f64, Logical>,
+     ) -> anyhow::Result<(OpeningWindowRenderElement, OffscreenData)> {
+         let progress = self.anim.value();
+         let clamped_progress = self.anim.clamped_value().clamp(0., 1.);
+@@ -111,6 +115,15 @@
+                     Uniform::new("niri_progress", progress as f32),
+                     Uniform::new("niri_clamped_progress", clamped_progress as f32),
+                     Uniform::new("niri_random_seed", self.random_seed),
++                    Uniform::new("niri_window_size", geo_size.to_array()),
++                    Uniform::new("niri_window_pos", geo_loc.to_array()),
++                    Uniform::new("niri_is_tabbed", if self.column_ctx.is_tabbed { 1.0_f32 } else { 0.0 }),
++                    Uniform::new("niri_total_columns", self.column_ctx.total_columns as f32),
++                    Uniform::new("niri_windows_in_column", self.column_ctx.windows_in_column as f32),
++                    Uniform::new("niri_window_index_in_column", self.column_ctx.window_index_in_column as f32),
++                    Uniform::new("niri_columns_in_workspace", self.column_ctx.columns_in_workspace as f32),
++                    Uniform::new("niri_column_index_in_workspace", self.column_ctx.column_index_in_workspace as f32),
++                    Uniform::new("niri_output_size", Vec2::new(output_size.w as f32, output_size.h as f32).to_array()),
+                 ]),
+                 HashMap::from([(String::from("niri_tex"), texture.clone())]),
+                 Kind::Unspecified,
+--- a/src/layout/scrolling.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/layout/scrolling.rs	2026-06-25 20:55:40.090111070 -0600
+@@ -10,7 +10,7 @@
+ use smithay::backend::renderer::gles::GlesRenderer;
+ use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
+ 
+-use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
++use super::closing_window::{ClosingWindow, ClosingWindowRenderElement, ColumnCtx};
+ use super::monitor::InsertPosition;
+ use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
+ use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
+@@ -1503,7 +1503,16 @@
+             tile_pos.x -= offset;
+         }
+ 
+-        self.start_close_animation_for_tile(renderer, snapshot, tile_size, tile_pos, blocker);
++        let column_ctx = ColumnCtx {
++            is_tabbed: col.display_mode == ColumnDisplay::Tabbed,
++            total_columns: self.columns.len(),
++            windows_in_column: col.tiles.len(),
++            window_index_in_column: tile_idx,
++            columns_in_workspace: self.columns.len(),
++            column_index_in_workspace: col_idx,
++        };
++
++        self.start_close_animation_for_tile(renderer, snapshot, tile_size, tile_pos, blocker, column_ctx);
+     }
+ 
+     fn start_close_animation_for_tile(
+@@ -1513,6 +1522,7 @@
+         tile_size: Size<f64, Logical>,
+         tile_pos: Point<f64, Logical>,
+         blocker: TransactionBlocker,
++        column_ctx: ColumnCtx,
+     ) {
+         let anim = Animation::new(
+             self.clock.clone(),
+@@ -1529,8 +1539,11 @@
+         };
+ 
+         let scale = Scale::from(self.scale);
++        let view_origin = Point::from((self.view_pos(), 0.));
++        let output_size = self.view_size;
+         let res = ClosingWindow::new(
+-            renderer, snapshot, scale, tile_size, tile_pos, blocker, anim,
++            renderer, snapshot, scale, tile_size, tile_pos, blocker, anim, column_ctx,
++            view_origin, output_size,
+         );
+         match res {
+             Ok(closing) => {
+@@ -1543,9 +1556,13 @@
+     }
+ 
+     pub fn start_open_animation(&mut self, id: &W::Id) -> bool {
+-        self.columns
+-            .iter_mut()
+-            .any(|col| col.start_open_animation(id))
++        let total_columns = self.columns.len();
++        for (col_idx, col) in self.columns.iter_mut().enumerate() {
++            if col.start_open_animation(id, col_idx, total_columns) {
++                return true;
++            }
++        }
++        false
+     }
+ 
+     pub fn focus_left(&mut self) -> bool {
+@@ -5327,10 +5344,19 @@
+         Rectangle::new(self.tiles_origin(), area_size)
+     }
+ 
+-    pub fn start_open_animation(&mut self, id: &W::Id) -> bool {
+-        for tile in &mut self.tiles {
++    pub fn start_open_animation(&mut self, id: &W::Id, col_idx: usize, total_columns: usize) -> bool {
++        let num_tiles = self.tiles.len();
++        for (tile_idx, tile) in self.tiles.iter_mut().enumerate() {
+             if tile.window().id() == id {
+-                tile.start_open_animation();
++                let column_ctx = ColumnCtx {
++                    is_tabbed: self.display_mode == ColumnDisplay::Tabbed,
++                    total_columns,
++                    windows_in_column: num_tiles,
++                    window_index_in_column: tile_idx,
++                    columns_in_workspace: total_columns,
++                    column_index_in_workspace: col_idx,
++                };
++                tile.start_open_animation(column_ctx);
+ 
+                 // Animate the appearance of the tab indicator.
+                 if self.display_mode == ColumnDisplay::Tabbed
+--- a/src/layout/tile.rs	1969-12-31 17:00:01.000000000 -0700
++++ b/src/layout/tile.rs	2026-06-25 20:16:06.563415858 -0600
+@@ -8,6 +8,7 @@
+ use smithay::backend::renderer::gles::GlesRenderer;
+ use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
+ 
++use super::closing_window::ColumnCtx;
+ use super::focus_ring::{FocusRing, FocusRingRenderElement};
+ use super::opening_window::{OpenAnimation, OpeningWindowRenderElement};
+ use super::shadow::Shadow;
+@@ -558,14 +559,14 @@
+         offset
+     }
+ 
+-    pub fn start_open_animation(&mut self) {
++    pub fn start_open_animation(&mut self, column_ctx: ColumnCtx) {
+         self.open_animation = Some(OpenAnimation::new(Animation::new(
+             self.clock.clone(),
+             0.,
+             1.,
+             0.,
+             self.options.animations.window_open.anim,
+-        )));
++        ), column_ctx));
+     }
+ 
+     pub fn resize_animation(&self) -> Option<&Animation> {
+@@ -1136,6 +1137,7 @@
+                             radius,
+                             clip_to_geometry,
+                             win_alpha,
++                            self.view_size,
+                         );
+ 
+                         // We're drawing the resize shader, not the offscreen directly.
+@@ -1351,6 +1353,7 @@
+                 location,
+                 scale,
+                 tile_alpha,
++                self.view_size,
+             ) {
+                 Ok((elem, data)) => {
+                     self.window().set_offscreen_data(Some(data));
+--- a/src/render_helpers/resize.rs	2026-06-25 20:16:25.805967759 -0600
++++ b/src/render_helpers/resize.rs	2026-06-25 20:16:06.563778455 -0600
+@@ -33,6 +33,7 @@
+         corner_radius: CornerRadius,
+         clip_to_geometry: bool,
+         result_alpha: f32,
++        output_size: Size<f64, Logical>,
+     ) -> Self {
+         let curr_geo = area;
+ 
+@@ -104,6 +105,8 @@
+                     Uniform::new("niri_clamped_progress", clamped_progress),
+                     Uniform::new("niri_corner_radius", <[f32; 4]>::from(corner_radius)),
+                     Uniform::new("niri_clip_to_geometry", clip_to_geometry),
++                    Uniform::new("niri_window_pos", curr_geo_loc.to_array()),
++                    Uniform::new("niri_output_size", Vec2::new(output_size.w as f32, output_size.h as f32).to_array()),
+                 ]),
+                 HashMap::from([
+                     (String::from("niri_tex_prev"), texture_prev),
+--- a/src/render_helpers/shaders/close_prelude.frag	2026-06-25 20:16:25.806780297 -0600
++++ b/src/render_helpers/shaders/close_prelude.frag	2026-06-25 20:16:06.563990605 -0600
+@@ -20,4 +20,13 @@
+ 
+ uniform float niri_alpha;
+ uniform float niri_scale;
++uniform vec2 niri_window_size;
++uniform vec2 niri_window_pos;
++uniform float niri_is_tabbed;
++uniform float niri_total_columns;
++uniform float niri_windows_in_column;
++uniform float niri_window_index_in_column;
++uniform float niri_columns_in_workspace;
++uniform float niri_column_index_in_workspace;
++uniform vec2 niri_output_size;
+ 
+--- a/src/render_helpers/shaders/mod.rs	2026-06-25 20:16:25.806913499 -0600
++++ b/src/render_helpers/shaders/mod.rs	2026-06-25 20:16:06.564182555 -0600
+@@ -353,6 +353,8 @@
+         UniformName::new("niri_clamped_progress", UniformType::_1f),
+         UniformName::new("niri_corner_radius", UniformType::_4f),
+         UniformName::new("niri_clip_to_geometry", UniformType::_1f),
++        UniformName::new("niri_window_pos", UniformType::_2f),
++        UniformName::new("niri_output_size", UniformType::_2f),
+     ];
+     let textures = &["niri_tex_prev", "niri_tex_next"];
+ 
+@@ -403,6 +405,15 @@
+             UniformName::new("niri_progress", UniformType::_1f),
+             UniformName::new("niri_clamped_progress", UniformType::_1f),
+             UniformName::new("niri_random_seed", UniformType::_1f),
++            UniformName::new("niri_window_size", UniformType::_2f),
++            UniformName::new("niri_window_pos", UniformType::_2f),
++            UniformName::new("niri_is_tabbed", UniformType::_1f),
++            UniformName::new("niri_total_columns", UniformType::_1f),
++            UniformName::new("niri_windows_in_column", UniformType::_1f),
++            UniformName::new("niri_window_index_in_column", UniformType::_1f),
++            UniformName::new("niri_columns_in_workspace", UniformType::_1f),
++            UniformName::new("niri_column_index_in_workspace", UniformType::_1f),
++            UniformName::new("niri_output_size", UniformType::_2f),
+         ],
+         &["niri_tex"],
+     )
+@@ -448,6 +459,15 @@
+             UniformName::new("niri_progress", UniformType::_1f),
+             UniformName::new("niri_clamped_progress", UniformType::_1f),
+             UniformName::new("niri_random_seed", UniformType::_1f),
++            UniformName::new("niri_window_size", UniformType::_2f),
++            UniformName::new("niri_window_pos", UniformType::_2f),
++            UniformName::new("niri_is_tabbed", UniformType::_1f),
++            UniformName::new("niri_total_columns", UniformType::_1f),
++            UniformName::new("niri_windows_in_column", UniformType::_1f),
++            UniformName::new("niri_window_index_in_column", UniformType::_1f),
++            UniformName::new("niri_columns_in_workspace", UniformType::_1f),
++            UniformName::new("niri_column_index_in_workspace", UniformType::_1f),
++            UniformName::new("niri_output_size", UniformType::_2f),
+         ],
+         &["niri_tex"],
+     )
+--- a/src/render_helpers/shaders/open_prelude.frag	2026-06-25 20:16:25.807320646 -0600
++++ b/src/render_helpers/shaders/open_prelude.frag	2026-06-25 20:16:06.564440257 -0600
+@@ -20,4 +20,13 @@
+ 
+ uniform float niri_alpha;
+ uniform float niri_scale;
++uniform vec2 niri_window_size;
++uniform vec2 niri_window_pos;
++uniform float niri_is_tabbed;
++uniform float niri_total_columns;
++uniform float niri_windows_in_column;
++uniform float niri_window_index_in_column;
++uniform float niri_columns_in_workspace;
++uniform float niri_column_index_in_workspace;
++uniform vec2 niri_output_size;
+ 
+--- a/src/render_helpers/shaders/resize_prelude.frag	2026-06-25 20:16:25.807634268 -0600
++++ b/src/render_helpers/shaders/resize_prelude.frag	2026-06-25 20:16:06.564566936 -0600
+@@ -27,5 +27,7 @@
+ 
+ uniform float niri_alpha;
+ uniform float niri_scale;
++uniform vec2 niri_window_pos;
++uniform vec2 niri_output_size;
+ 
+ float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
