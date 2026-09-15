@@ -31,6 +31,13 @@
       inherit mkShaders mkShaderCheck;
       shaderLib = pkgs: import ./niri-shader-lib.nix { inherit pkgs; lib = pkgs.lib; };
       anims = import ./niri-shader-anims.nix;
+      # Compositor duration-ms for a profile — same numbers home-module writes
+      # into ~/.config/niri-shaders/animations.kdl.
+      profileDurations = { pkgs, shaderProfile }:
+        (mkShaders {
+          inherit pkgs shaderProfile;
+          niriPkg = null;
+        }).durations;
     };
 
     homeManagerModules.default = import ./home-module.nix;

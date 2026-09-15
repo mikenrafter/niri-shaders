@@ -1309,4 +1309,16 @@ in
 {
   inherit simple full;
   inherit unhook-only shredder-only voronoi-only;
+
+  # Per-animation wall-clock lengths (ms). Profile compositor durations are
+  # max(...) over the active profile's tuples — see lib.profileDurations /
+  # assembleProfile.durations in the flake.
+  durationMs = {
+    closeUnhook = DUR_CLOSE_UNHOOK;
+    closeShredder = DUR_CLOSE_SHREDDER;
+    closeVoronoi = DUR_CLOSE_VORONOI;
+    openNgon = DUR_OPEN_NGON;
+    openVoronoi = DUR_OPEN_VORONOI;
+    resizeCrt = DUR_RESIZE_CRT;
+  };
 }

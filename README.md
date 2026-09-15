@@ -37,37 +37,6 @@ Set `programs.niri.shaders.shaderProfile` to `unhook-only`, `shredder-only`, or
 `voronoi-only`, apply with `nix-scout switch niri`, then close a window to see
 the live version.
 
-### Regenerating the GIFs
-
-Base images live in `showcase/assets/`:
-
-| File | Role |
-|------|------|
-| `terminal-example.png` | Window texture for close clips |
-| `dms-wallpaper.png` | Solid DMS backdrop (`#1a1110`) |
-| `small-terminal.png` / `medium-terminal.png` / `large-terminal.png` | CRT resize chain |
-
-Needs `python3` + `moderngl` + `pillow`, `ffmpeg`, and a built shader store:
-
-```bash
-# Build a per-profile store (writes windowClose.glsl / windowResize.glsl)
-NIRI_SHADER_STORE=$(nix build --no-link --print-out-paths --impure --expr '
-  let pkgs = import (builtins.getFlake "path:'"$(pwd)"'").inputs.nixpkgs { system = "x86_64-linux"; };
-  in pkgs.callPackage ./niri-shader-check.nix {
-    niriPkg = pkgs.niri; shaderProfile = "unhook-only"; shaderProfiles = [ "unhook-only" ];
-  }')
-
-NIRI_SHADER_STORE=$NIRI_SHADER_STORE python3 niri-shader-gif.py windowClose \
-  --texture showcase/assets/terminal-example.png \
-  --backdrop showcase/assets/dms-wallpaper.png \
-  --duration-ms 900 \
-  --out showcase/unhook-close.gif
-```
-
-Repeat with `shredder-only` / `3000`, `voronoi-only` / `1200 --layout right-half`,
-and `simple` + `windowResize` / `1000` with the three terminal sizes. Durations
-must match `DUR_CLOSE_*` / `DUR_RESIZE_CRT` in `niri-shader-anims.nix`.
-
 ## Usage
 
 Add the flake input and pull in the Home Manager module:
@@ -140,9 +109,46 @@ on the next config reload. Your niri build also needs the 3 patches in
 
 - `lib.mkShaders` / `lib.mkShaderCheck` — the raw `niri-shaders.nix` /
   `niri-shader-check.nix` functions, for direct Nix-level use.
+- `lib.anims.durationMs` — per-animation wall-clock lengths (ms).
+- `lib.profileDurations { pkgs, shaderProfile }` — compositor `duration-ms`
+  for a profile (max over that profile's tuples; same values the HM module
+  writes into `animations.kdl`).
 - `homeManagerModules.default` — the HM module above (options:
   `programs.niri.shaders.enable`, `.shaderProfile`).
 - `checks.${system}.default` — the GLSL validation-check derivation (both
   `full` and `simple` profiles), built against plain `pkgs.niri`. Run it with
   `nix flake check`.
 - `devShells.${system}.default` — python3, glslang, glslviewer.
+
+## Regenerating the GIFs
+
+Base images live in `showcase/assets/`:
+
+| File | Role |
+|------|------|
+| `terminal-example.png` | Window texture for close clips |
+| `dms-wallpaper.png` | Solid DMS backdrop (`#1a1110`) |
+| `small-terminal.png` / `medium-terminal.png` / `large-terminal.png` | CRT resize chain |
+
+Needs `python3` + `moderngl` + `pillow`, `ffmpeg`, and a built shader store.
+`--duration-ms` must match `lib.anims.durationMs` / the profile's
+`lib.profileDurations` (same values the Home Manager module writes into
+`animations.kdl`):
+
+```bash
+# Build a per-profile store (writes windowClose.glsl / windowResize.glsl)
+NIRI_SHADER_STORE=$(nix build --no-link --print-out-paths --impure --expr '
+  let pkgs = import (builtins.getFlake "path:'"$(pwd)"'").inputs.nixpkgs { system = "x86_64-linux"; };
+  in pkgs.callPackage ./niri-shader-check.nix {
+    niriPkg = pkgs.niri; shaderProfile = "unhook-only"; shaderProfiles = [ "unhook-only" ];
+  }')
+
+NIRI_SHADER_STORE=$NIRI_SHADER_STORE python3 niri-shader-gif.py windowClose \
+  --texture showcase/assets/terminal-example.png \
+  --backdrop showcase/assets/dms-wallpaper.png \
+  --duration-ms 900 \
+  --out showcase/unhook-close.gif
+```
+
+Repeat with `shredder-only` / `3000`, `voronoi-only` / `1200 --layout right-half`,
+and `simple` + `windowResize` / `1000` with the three terminal sizes.
