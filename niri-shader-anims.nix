@@ -39,8 +39,7 @@ let
   # Runtime fall extent also scales via niri_output_size / niri_window_pos so
   # pieces clear the visible output, not just the window bottom.
   SHREDDER_PHYSICS_REF_MS = 1200;
-  closeTotalMs = DUR_CLOSE_SHREDDER;
-  SHREDDER_PHYSICS_SCALE = closeTotalMs / (SHREDDER_PHYSICS_REF_MS * 1.0);
+  SHREDDER_PHYSICS_SCALE = DUR_CLOSE_SHREDDER / (SHREDDER_PHYSICS_REF_MS * 1.0);
 
   # ── Animation B/V phase boundaries (fraction of 1200 ms) ─────────────────
   T1 = 0.0833;
@@ -253,7 +252,8 @@ let
             vec3  ct   = niri_geo_to_tex * cg2;
             float ib   = step(0.0, ct.x) * step(ct.x, 1.0)
                        * step(0.0, ct.y) * step(ct.y, 1.0);
-            return texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0))) * (a * ib);
+            vec4  col  = texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0)));
+            return vec4(col.rgb * col.a, col.a) * (a * ib);
         }
       '';
 
@@ -297,9 +297,9 @@ let
             float off_bottom  = max(niri_output_size.y - niri_window_pos.y, sz.y);
             float fall_gone_y = off_bottom + MAX_HALF_H;
 
-            // Router progress is [0,1] over the full close envelope; stretch into
-            // the 1200 ms physics timeline.  Slide uses that base time; fall
-            // may scale up so the last segment clears the output bottom at t_prog=1.
+            // Router progress is [0,1] over DUR_CLOSE_SHREDDER; stretch into the
+            // 1200 ms physics timeline. Slide uses that base time; fall may scale
+            // up so the last segment clears the output bottom at t_prog=1.
             float release_step = ${toString SLIDE_END_C} * SEG_H * inv_sz.y;
             float gi_last      = float(max(nsegs - 1, 0));
             float dt_base      = max(${toString SHREDDER_PHYSICS_SCALE}
@@ -313,7 +313,14 @@ let
                 float t_fall_end = dt_need + gi_last * release_step;
                 fall_time_scale = max(t_fall_end / ${toString SHREDDER_PHYSICS_SCALE}, 1.0);
             }
-            float t_slide = t_prog * ${toString SHREDDER_PHYSICS_SCALE};
+            // Intact lead-in: first 300 ms of wall-clock progress stays unshredded.
+            // Without this, gi=0 releases at t_rel=0 and tumble_phase foreshortens
+            // strips on the first dt>0 — looks mid-shred from frame 1.
+            float lead = 300.0 / ${toString DUR_CLOSE_SHREDDER}.0;
+            float t_anim = (t_prog <= lead)
+                ? 0.0
+                : (t_prog - lead) / max(1.0 - lead, 1e-6);
+            float t_slide = t_anim * ${toString SHREDDER_PHYSICS_SCALE};
             float t_fall  = t_slide * fall_time_scale;
 
             // Precompute slide progress and cut-line (Phase 1 guard).
@@ -336,6 +343,10 @@ let
                 float t_rel = float(gi) * release_step;
                 if (t_slide < t_rel) break;
                 float dt = t_fall - t_rel;
+                // gi=0 releases at t_rel=0; at dt==0 tumble_phase is already
+                // nonzero and foreshortens strips — looks "pre-shredded" at t=0.
+                // Skip Phase 2 until the piece has actually started falling.
+                if (dt <= 0.0) continue;
                 float cy = HALF_SEG + (-V0_UP * dt + GRAVITY_HALF * dt * dt);
                 piece_ymin = min(piece_ymin, cy - MAX_HALF_H);
                 piece_ymax = max(piece_ymax, cy + MAX_HALF_H);
@@ -350,6 +361,7 @@ let
                 if (t_slide < t_rel) break;
 
                 float dt       = t_fall - t_rel;
+                if (dt <= 0.0) continue;
                 float fall_y   = -V0_UP * dt + GRAVITY_HALF * dt * dt;
                 float fgi      = float(gi);
                 float center_y = HALF_SEG + fall_y;
@@ -459,13 +471,19 @@ let
                     float white_mix = WHITE_MIX * fract(fsi * 19.7 + ls * 23.1);
                     vec3  rgb        = vec3(r, g_sample.g, b);
                     rgb = mix(rgb, vec3(1.0), white_mix);
-
-                    return vec4(rgb, g_sample.a);
+                    // Premultiplied (matches unhook / niri compositing).
+                    return vec4(rgb * g_sample.a, g_sample.a);
                 }
             }
             }
 
             // ── Phase 1: whole window slides upward ───────────────────────────
+            // Only inside the window x-band. Outside, Phase 2 owns falling pieces;
+            // running Phase 1 here clamp-bleeds texture edge colour into the margin
+            // (the green/magenta fringe on encompassing canvases).
+            if (cg.x < 0.0 || cg.x > 1.0 || cg.y < 0.0 || cg.y > 1.0)
+                return vec4(0.0);
+
             // Cut-line guard: released segments must not ghost behind falling pieces.
             if (cg.y < cut_screen_y) return vec4(0.0);
 
@@ -474,7 +492,8 @@ let
             vec3 ct  = niri_geo_to_tex * vec3(cg.x, sample_y, 1.0);
             vec4 col = texture(niri_tex, clamp(ct.st, 0.0, 1.0));
             if (DEBUG_C) col = mix(col, vec4(0.2, 0.6, 1.0, 1.0), 0.25);
-            return col;
+            // texture() is straight; premultiply for compositor.
+            return vec4(col.rgb * col.a, col.a);
         }
       '';
 
@@ -528,9 +547,13 @@ let
 
             if (t < T2) {
                 vec2  tc = vec2(gx, cg.y);
-                float ib = step(0.0, tc.x) * step(tc.x, 1.0);
+                // Both axes — X-only ib + UV clamp bled a 1px green fringe past the border.
+                if (tc.x < 0.0 || tc.x > 1.0 || tc.y < 0.0 || tc.y > 1.0)
+                    return vec4(0.0);
                 vec3  ct = niri_geo_to_tex * vec3(tc, 1.0);
-                return texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0))) * ib;
+                vec4  col = texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0)));
+                // Premultiply — straight-alpha edge samples + PMA composite = green fringe.
+                return vec4(col.rgb * col.a, col.a);
             }
 
             vec2  crko   = vec2(0.5 * sz.x, fract(s * 5.7 + 0.3) * sz.y);
@@ -550,7 +573,8 @@ let
             bool explode_static = explode_mode && (t <= T2);
             if (t < T3 && (!explode_mode || explode_static)) {
                 vec2  q_norm = q_stat * inv_sz;
-                float ib = step(0.0, q_norm.x) * step(q_norm.x, 1.0);
+                if (q_norm.x < 0.0 || q_norm.x > 1.0 || q_norm.y < 0.0 || q_norm.y > 1.0)
+                    return vec4(0.0);
 
                 vec2  q_orig   = q_stat;
                 float edge     = voronoi_edge_norm(variant, q_norm) * min(sz.x, sz.y);
@@ -558,7 +582,8 @@ let
                 float op = 1.0 - 0.7 * step(edge, 1.5)
                                    * step(dot(crack_dv, crack_dv), cfr_sq);
                 vec3  ct = niri_geo_to_tex * vec3(q_norm, 1.0);
-                return texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0))) * (op * ib);
+                vec4  col = texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0)));
+                return vec4(col.rgb * col.a, col.a) * op;
             }
 
             // Vertex centres + per-cell physics (merged into one 16-loop).
@@ -659,13 +684,18 @@ let
 
             if (found < 0.5) return vec4(0.0);
 
-            float edge = voronoi_edge_norm(variant, q_orig * inv_sz) * min(sz.x, sz.y);
+            vec2 q_uv = q_orig * inv_sz;
+            if (q_uv.x < 0.0 || q_uv.x > 1.0 || q_uv.y < 0.0 || q_uv.y > 1.0)
+                return vec4(0.0);
+
+            float edge = voronoi_edge_norm(variant, q_uv) * min(sz.x, sz.y);
             vec2  crack_dv = q_orig - crko;
             float op   = 1.0 - 0.7 * step(edge, 1.5)
                                    * step(dot(crack_dv, crack_dv), cfr_sq);
 
-            vec3 ct = niri_geo_to_tex * vec3(q_orig * inv_sz, 1.0);
-            vec4 tex_pm = texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0))) * op;
+            vec3 ct = niri_geo_to_tex * vec3(q_uv, 1.0);
+            vec4 col = texture(niri_tex, clamp(ct.st, vec2(0.0), vec2(1.0)));
+            vec4 tex_pm = vec4(col.rgb * col.a, col.a) * op;
             if (is_flying > 0.5) {
                 float ga = ${toString CLOSE_V_GLASS_ALPHA};
                 vec4 glass_pm = vec4(vec3(${toString CLOSE_V_GLASS_RGB}) * ga, ga);
@@ -1217,7 +1247,66 @@ let
       }
     ];
   };
+
+  # Showcase-only close profiles: one animation, always selected (no seed routing
+  # or layout predicates). Open/resize keep the simple defaults so niri still has
+  # a complete animations.kdl. Switch via programs.niri.shaders.shaderProfile.
+  unhook-only = {
+    openSharedPreamble = simple.openSharedPreamble;
+    open = simple.open;
+    resizeSharedPreamble = simple.resizeSharedPreamble;
+    resize = simple.resize;
+    closeSharedPreamble = fastSincosPreamble;
+    close = [
+      {
+        fn = "close_unhook_fall";
+        durationMs = DUR_CLOSE_UNHOOK;
+        needsVoronoiBake = false;
+        body = animations.close.unhook-fall;
+      }
+    ];
+  };
+
+  shredder-only = {
+    openSharedPreamble = simple.openSharedPreamble;
+    open = simple.open;
+    resizeSharedPreamble = simple.resizeSharedPreamble;
+    resize = simple.resize;
+    closeSharedPreamble = fastSincosPreamble;
+    close = [
+      {
+        fn = "close_shredder";
+        durationMs = DUR_CLOSE_SHREDDER;
+        needsVoronoiBake = false;
+        body = animations.close.shredder;
+      }
+    ];
+  };
+
+  voronoi-only = {
+    openSharedPreamble = fastSincosPreamble + voronoiRuntimePreamble;
+    open = [
+      {
+        fn = "open_voronoi_shatter";
+        durationMs = DUR_OPEN_VORONOI;
+        needsVoronoiBake = true;
+        body = animations.open.voronoi-shatter;
+      }
+    ];
+    resizeSharedPreamble = simple.resizeSharedPreamble;
+    resize = simple.resize;
+    closeSharedPreamble = fastSincosPreamble + voronoiRuntimePreamble;
+    close = [
+      {
+        fn = "close_voronoi_crumble";
+        durationMs = DUR_CLOSE_VORONOI;
+        needsVoronoiBake = true;
+        body = animations.close.voronoi-crumble;
+      }
+    ];
+  };
 in
 {
   inherit simple full;
+  inherit unhook-only shredder-only voronoi-only;
 }

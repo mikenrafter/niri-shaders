@@ -5,6 +5,53 @@ custom-shader window animations (window-open / window-close / window-resize).
 
 ## Showcase
 
+Seamless 50 fps loops (forward 1× → hold 600 ms → reverse 2× → hold 300 ms),
+progress always 0→1→0. Close loop length = `duration_ms × 1.5 + 900`.
+50 fps keeps GIF frame delay at exactly 20 ms (browsers clamp 10 ms → 20 ms,
+which made earlier 60 fps encodes play at 1.2×).
+
+| Profile / clip | GIF | Loop |
+|----------------|-----|------|
+| `unhook-only` (900 ms) | ![unhook](showcase/unhook-close.gif) | 2250 ms |
+| `shredder-only` (3000 ms) | ![shredder](showcase/shredder-close.gif) | 5400 ms |
+| `voronoi-only` (1200 ms, right→left travel) | ![voronoi](showcase/voronoi-close.gif) | 2700 ms |
+| CRT resize (`small→medium→large→medium→small`, 1000 ms/leg) | ![resize](showcase/crt-resize.gif) | 4250 ms |
+
+Live capture of the close profiles: set `programs.niri.shaders.shaderProfile` to
+`unhook-only`, `shredder-only`, or `voronoi-only`, apply with `nix-scout switch niri`,
+screen-record a close, then switch again.
+
+### Regenerating the GIFs
+
+Base images live in `showcase/assets/`:
+
+| File | Role |
+|------|------|
+| `terminal-example.png` | Window texture for close clips |
+| `dms-wallpaper.png` | Solid DMS backdrop (`#1a1110`) |
+| `small-terminal.png` / `medium-terminal.png` / `large-terminal.png` | CRT resize chain |
+
+Needs `python3` + `moderngl` + `pillow`, `ffmpeg`, and a built shader store:
+
+```bash
+# Build a per-profile store (writes windowClose.glsl / windowResize.glsl)
+NIRI_SHADER_STORE=$(nix build --no-link --print-out-paths --impure --expr '
+  let pkgs = import (builtins.getFlake "path:'"$(pwd)"'").inputs.nixpkgs { system = "x86_64-linux"; };
+  in pkgs.callPackage ./niri-shader-check.nix {
+    niriPkg = pkgs.niri; shaderProfile = "unhook-only"; shaderProfiles = [ "unhook-only" ];
+  }')
+
+NIRI_SHADER_STORE=$NIRI_SHADER_STORE python3 niri-shader-gif.py windowClose \
+  --texture showcase/assets/terminal-example.png \
+  --backdrop showcase/assets/dms-wallpaper.png \
+  --duration-ms 900 \
+  --out showcase/unhook-close.gif
+```
+
+Repeat with `shredder-only` / `3000`, `voronoi-only` / `1200 --layout right-half`,
+and `simple` + `windowResize` / `1000` with the three terminal sizes. Durations
+must match `DUR_CLOSE_*` / `DUR_RESIZE_CRT` in `niri-shader-anims.nix`.
+
 ## Usage
 
 Add the flake input and pull in the Home Manager module:
@@ -24,7 +71,8 @@ Enable it and pick a profile:
 ```nix
 programs.niri.shaders = {
   enable = true;
-  shaderProfile = "full"; # or "simple" — see niri-shader-anims.nix
+  # "full" | "simple" | "unhook-only" | "shredder-only" | "voronoi-only"
+  shaderProfile = "full";
 };
 ```
 
@@ -42,7 +90,7 @@ on the next config reload. Your niri build also needs the 3 patches in
 ## Layout
 
 - `niri-shader-anims.nix` — animation tuple registry (GLSL bodies, durations,
-  probabilities, `full`/`simple` profiles).
+  probabilities, `full`/`simple`/showcase-only profiles).
 - `niri-shader-lib.nix` — assembly library: seed-routing codegen, profile
   duration math, the baked-Voronoi derivation, and `readNiriShaderCompileInfo`
   (extracts `#version`/prelude/epilogue from a niri source tree).
@@ -53,6 +101,8 @@ on the next config reload. Your niri build also needs the 3 patches in
   enforces the seed-scaling isolation invariant on close/open bodies.
 - `niri-shader-glsl-compile.py`, `gen-voronoi-bake.py`, `niri-voronoi-bake.nix`
   — supporting compile/bake scripts.
+- `niri-shader-gif.py` — headless 50 fps seamless GIF exporter (moderngl).
+- `showcase/` — rendered GIFs + `assets/` source textures for regeneration.
 - `niri-glslviewer.py`, `voronoi-glsl-harness.c`, `voronoi-shader-test.py` —
   interactive/offline shader dev tooling.
 - `niri-animations-spec.md` — design spec for the shipped animations.

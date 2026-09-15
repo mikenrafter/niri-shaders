@@ -14,7 +14,13 @@
 
     shaderCheck = pkgs.callPackage mkShaderCheck {
       niriPkg = pkgs.niri;
-      shaderProfiles = [ "full" "simple" ];
+      shaderProfiles = [
+        "full"
+        "simple"
+        "unhook-only"
+        "shredder-only"
+        "voronoi-only"
+      ];
       shaderProfile = "full";
     };
   in

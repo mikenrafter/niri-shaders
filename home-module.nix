@@ -55,8 +55,10 @@ in
       type = lib.types.str;
       default = "full";
       description = ''
-        Shader profile: "full" (voronoi crumble close, ngon/voronoi open) or
-        "simple" (A+C close, A open) — see niri-shader-anims.nix.
+        Shader profile name from niri-shader-anims.nix:
+        - "full" — unhook + shredder + voronoi close; ngon + voronoi open
+        - "simple" — unhook + shredder close; ngon open
+        - "unhook-only" / "shredder-only" / "voronoi-only" — showcase singles
       '';
     };
   };

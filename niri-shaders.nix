@@ -3,7 +3,7 @@
 # Arguments:
 #   pkgs          — nixpkgs instance
 #   niriPkg       — niri package (used by readNiriShaderCompileInfo; pass null to skip)
-#   shaderProfile — "full" (voronoi crumble, default) or "simple" (A+C close, A open)
+#   shaderProfile — "full" | "simple" | "unhook-only" | "shredder-only" | "voronoi-only"
 #
 # Returns { windowClose, windowOpen, windowResize, durations } — GLSL body strings
 # and compositor duration-ms values (max per event) for niri.nix.
