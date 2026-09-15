@@ -20,7 +20,7 @@ custom-shader window animations (window-open / window-close / window-resize).
 </details>
 
 <details>
-<summary>Voronoi — cracks, then shards throw left across the screen</summary>
+<summary>Voronoi — throws window to the screen edge, cracks and shards fly away/summary>
 
 ![voronoi](showcase/voronoi-close.gif)
 
