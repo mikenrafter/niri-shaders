@@ -3,6 +3,42 @@
 Nix + Python generator and GLSL validator for [niri](https://github.com/YaLTeR/niri)
 custom-shader window animations (window-open / window-close / window-resize).
 
+## Showcase
+
+## Usage
+
+Add the flake input and pull in the Home Manager module:
+
+```nix
+inputs.niri-shaders.url = "github:mikenrafter/niri-shaders";
+inputs.niri-shaders.inputs.nixpkgs.follows = "nixpkgs";
+```
+
+```nix
+# home-manager module list
+modules = [ inputs.niri-shaders.homeManagerModules.default ];
+```
+
+Enable it and pick a profile:
+
+```nix
+programs.niri.shaders = {
+  enable = true;
+  shaderProfile = "full"; # or "simple" — see niri-shader-anims.nix
+};
+```
+
+Point your niri config at the generated KDL instead of embedding shaders
+inline:
+
+```
+include "~/.config/niri-shaders/animations.kdl" optional=true
+```
+
+That's it — `home-manager switch` renders `animations.kdl`, niri picks it up
+on the next config reload. Your niri build also needs the 3 patches in
+`patches/` applied (see [Layout](#layout)) for the shaders to compile.
+
 ## Layout
 
 - `niri-shader-anims.nix` — animation tuple registry (GLSL bodies, durations,
