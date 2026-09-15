@@ -5,21 +5,37 @@ custom-shader window animations (window-open / window-close / window-resize).
 
 ## Showcase
 
-Seamless 50 fps loops (forward 1× → hold 600 ms → reverse 2× → hold 300 ms),
-progress always 0→1→0. Close loop length = `duration_ms × 1.5 + 900`.
-50 fps keeps GIF frame delay at exactly 20 ms (browsers clamp 10 ms → 20 ms,
-which made earlier 60 fps encodes play at 1.2×).
+<details>
+<summary>Unhook — window unhooks from the top and falls on an arc</summary>
 
-| Profile / clip | GIF | Loop |
-|----------------|-----|------|
-| `unhook-only` (900 ms) | ![unhook](showcase/unhook-close.gif) | 2250 ms |
-| `shredder-only` (3000 ms) | ![shredder](showcase/shredder-close.gif) | 5400 ms |
-| `voronoi-only` (1200 ms, right→left travel) | ![voronoi](showcase/voronoi-close.gif) | 2700 ms |
-| CRT resize (`small→medium→large→medium→small`, 1000 ms/leg) | ![resize](showcase/crt-resize.gif) | 4250 ms |
+![unhook](showcase/unhook-close.gif)
 
-Live capture of the close profiles: set `programs.niri.shaders.shaderProfile` to
-`unhook-only`, `shredder-only`, or `voronoi-only`, apply with `nix-scout switch niri`,
-screen-record a close, then switch again.
+</details>
+
+<details>
+<summary>Shredder — slides up into a shredder; strips tumble down</summary>
+
+![shredder](showcase/shredder-close.gif)
+
+</details>
+
+<details>
+<summary>Voronoi — cracks, then shards throw left across the screen</summary>
+
+![voronoi](showcase/voronoi-close.gif)
+
+</details>
+
+<details>
+<summary>CRT resize — barrel distort + tear as the window steps through sizes</summary>
+
+![resize](showcase/crt-resize.gif)
+
+</details>
+
+Set `programs.niri.shaders.shaderProfile` to `unhook-only`, `shredder-only`, or
+`voronoi-only`, apply with `nix-scout switch niri`, then close a window to see
+the live version.
 
 ### Regenerating the GIFs
 
