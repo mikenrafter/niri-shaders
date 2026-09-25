@@ -35,7 +35,6 @@ let
 
   profilesToValidate =
     if shaderProfiles == null then [ shaderProfile ] else shaderProfiles;
-  compileInfo = shaderLib.readNiriShaderCompileInfo patchedNiriPkg;
 
   mkShaders = profile:
     import ./niri-shaders.nix { inherit pkgs niriPkg; shaderProfile = profile; };
@@ -60,21 +59,17 @@ let
     ")/ 0."
   ];
 
+  # Prelude/epilogue/#version come from the patched niri source at build time;
+  # reading them at eval time would be import-from-derivation, which breaks
+  # `nix flake check --no-build` on a cold store.
+  patchedSrc = patchedNiriPkg.src;
+  shaderDir = "${patchedSrc}/src/render_helpers/shaders";
+
   eventTypes = [
-    { key = "windowClose"; prelude = compileInfo.preludes.close; epilogue = compileInfo.epilogues.close; }
-    { key = "windowOpen"; prelude = compileInfo.preludes.open; epilogue = compileInfo.epilogues.open; }
-    { key = "windowResize"; prelude = compileInfo.preludes.resize; epilogue = compileInfo.epilogues.resize; }
+    { key = "windowClose"; stem = "close"; }
+    { key = "windowOpen"; stem = "open"; }
+    { key = "windowResize"; stem = "resize"; }
   ];
-
-  preludeFiles = lib.genAttrs (map (e: e.key) eventTypes) (key:
-    let ev = lib.findFirst (e: e.key == key) (lib.throw "unknown event ${key}") eventTypes;
-    in pkgs.writeText "niri-${key}-prelude.frag" ev.prelude
-  );
-
-  epilogueFiles = lib.genAttrs (map (e: e.key) eventTypes) (key:
-    let ev = lib.findFirst (e: e.key == key) (lib.throw "unknown event ${key}") eventTypes;
-    in pkgs.writeText "niri-${key}-epilogue.frag" ev.epilogue
-  );
 
   bodyFiles = lib.genAttrs profilesToValidate (profile:
     lib.genAttrs [ "windowClose" "windowOpen" "windowResize" ] (key:
@@ -82,18 +77,12 @@ let
     )
   );
 
-  metaJson = pkgs.writeText "niri-shader-meta.json" (builtins.toJSON {
-    glslVersionLine = compileInfo.glslVersionLine;
-    profiles = profilesToValidate;
-    outputProfile = shaderProfile;
-  });
-
 in
 pkgs.runCommand "niri-shader-check"
   {
     nativeBuildInputs = [ pkgs.glslang pkgs.python3 ];
     passthru = {
-      inherit compileInfo shaderSets;
+      inherit shaderSets;
     };
   }
   ''
@@ -102,7 +91,30 @@ pkgs.runCommand "niri-shader-check"
     compile_py=${pkgs.python3}/bin/python3
     compile_script=${./niri-shader-glsl-compile.py}
     glslang_bin=${pkgs.glslang}/bin/glslangValidator
-    version_line=${lib.escapeShellArg compileInfo.glslVersionLine}
+
+    # ── #version / prelude / epilogue from patched niri source ───────────────
+    # Mirrors shaderLib.readNiriShaderCompileInfo.
+    elem_rs=${patchedSrc}/src/render_helpers/shader_element.rs
+    if grep -Fq '#version 300 es' "$elem_rs"; then
+      version_line='#version 300 es'
+    else
+      version_line='#version 100'
+    fi
+
+    frag_dir=$TMPDIR/frag
+    mkdir -p "$frag_dir"
+    ${lib.concatMapStringsSep "\n" (ev: ''
+      cp ${shaderDir}/${ev.stem}_prelude.frag "$frag_dir/${ev.key}-prelude.frag"
+      cat ${shaderDir}/${ev.stem}_epilogue.frag ${shaderDir}/rounding_alpha.frag \
+        > "$frag_dir/${ev.key}-epilogue.frag"
+    '') eventTypes}
+
+    # ── committed Voronoi bake matches generator ─────────────────────────────
+    if ! diff -q ${shaderLib.voronoiBakeDrv}/voronoi-bake.nix ${./niri-voronoi-bake.nix} >/dev/null; then
+      echo "niri-shader-check: niri-voronoi-bake.nix is stale; regenerate with" >&2
+      echo "  python3 gen-voronoi-bake.py > niri-voronoi-bake.nix" >&2
+      exit 1
+    fi
 
     # ── seed-scaling isolation (animation bodies only; resize exempt) ────────
     ${lib.concatMapStringsSep "\n" (file:
@@ -120,8 +132,8 @@ pkgs.runCommand "niri-shader-check"
         $compile_py $compile_script \
           --glslang "$glslang_bin" \
           --version-line "$version_line" \
-          --prelude-file ${preludeFiles.${ev.key}} \
-          --epilogue-file ${epilogueFiles.${ev.key}} \
+          --prelude-file "$frag_dir/${ev.key}-prelude.frag" \
+          --epilogue-file "$frag_dir/${ev.key}-epilogue.frag" \
           --body-file ${bodyFiles.${profile}.${ev.key}} \
           --label "${profile}/${ev.key}"
       '') eventTypes
@@ -131,5 +143,13 @@ pkgs.runCommand "niri-shader-check"
     cp ${bodyFiles.${shaderProfile}.windowClose} $out/windowClose.glsl
     cp ${bodyFiles.${shaderProfile}.windowOpen} $out/windowOpen.glsl
     cp ${bodyFiles.${shaderProfile}.windowResize} $out/windowResize.glsl
-    cp ${metaJson} $out/meta.json
+    VERSION_LINE="$version_line" $compile_py -c '
+    import json, os, sys
+    meta = json.loads(sys.argv[1])
+    meta["glslVersionLine"] = os.environ["VERSION_LINE"]
+    sys.stdout.write(json.dumps(meta, sort_keys=True, separators=(",", ":")))
+    ' ${lib.escapeShellArg (builtins.toJSON {
+      profiles = profilesToValidate;
+      outputProfile = shaderProfile;
+    })} > $out/meta.json
   ''

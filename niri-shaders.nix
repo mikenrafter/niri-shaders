@@ -19,11 +19,12 @@ let
   closeNeedsBake = anyNeedsVoronoiBake profile.close;
   openNeedsBake  = anyNeedsVoronoiBake profile.open;
 
-  voronoiBakeDrv = lib2.voronoiBakeDrv;
-
+  # Committed bake, not voronoiBakeDrv: importing a build output is
+  # import-from-derivation. niri-shader-check fails if this file drifts from
+  # gen-voronoi-bake.py.
   voronoiBakeStr =
     if closeNeedsBake || openNeedsBake
-    then (import "${voronoiBakeDrv}/voronoi-bake.nix").glslConstants
+    then (import ./niri-voronoi-bake.nix).glslConstants
     else null;
 
 in lib2.assembleProfile {
